@@ -8,17 +8,18 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/user"
+	// "os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"bytes"
 )
 
 var (
 	domain          = ""
 	template_dir    = "/etc/create-new-vhost/template-directory"
 	htaccess_file   = "/etc/publickeys/authpwd/authpwd"
-	destination_dir = "/srv/http/"
+	destination_dir = "/var/www/"
 	http_conf       = "http.conf"
 	http_ssl_conf   = "http-ssl.conf"
 	sites_available = "/etc/apache2/sites-available"
@@ -40,20 +41,50 @@ func init() {
 }
 
 func fetch_user_group_id() {
-	usr, err := user.Lookup(www_user)
+	id_path, err := exec.LookPath("id")
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(8)
+		os.Exit(1)
 	}
 
-	grp, _ := user.LookupGroup(www_group)
+  fmt.Println("Fetching UID for www-data user")
+	user_id_cmd := exec.Command(id_path, "-u", www_user)
+  fmt.Println(user_id_cmd)
+	var user_id_out bytes.Buffer
+	var user_id_err bytes.Buffer
+	user_id_cmd.Stdout = &user_id_out
+	user_id_cmd.Stderr = &user_id_err
+	err = user_id_cmd.Run()
+	if err != nil {
+    fmt.Println(string(user_id_err.String()))
+		log.Fatal(err)
+		os.Exit(254)
+	}
+
+  fmt.Println("Fetching UID for www-data group")
+	group_id_cmd := exec.Command(id_path, "-g", www_group)
+	var group_id_out bytes.Buffer
+	group_id_cmd.Stdout = &group_id_out
+	err = group_id_cmd.Run()
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(8)
+		os.Exit(254)
 	}
 
-	user_id, _ = strconv.Atoi(usr.Uid)
-	group_id, _ = strconv.Atoi(grp.Gid)
+	// usr, err := user.Lookup(www_user)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// 	os.Exit(8)
+	// }
+
+	// grp, _ := user.LookupGroup(www_group)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// 	os.Exit(8)
+	// }
+
+	user_id, _ = strconv.Atoi(string(user_id_out.String()))
+	group_id, _ = strconv.Atoi(string(group_id_out.String()))
 }
 
 func check_for_root() {
@@ -66,11 +97,12 @@ func check_for_root() {
 func print_arguments_summary() {
 	format_str := `
 Domain:             %v
+Template Directory:             %v
 destination-dir:    %v
 www-user:           %v
 www-group:          %v
 `
-	fmt.Printf(format_str, domain, destination_dir, www_user, www_group)
+	fmt.Printf(format_str, domain, template_dir, destination_dir, www_user, www_group)
 	fmt.Print("To you want to continue [n/Y] ")
 
 	var response string
@@ -79,7 +111,9 @@ www-group:          %v
 		log.Fatal(err)
 	}
 
-	if response != "y" {
+  response = strings.ToLower(strings.TrimSpace(response))
+
+	if !(response == "y") {
 		os.Exit(5)
 	}
 }
@@ -128,12 +162,88 @@ func create_new_virtualhost() {
 
 	modify_http_conf(filepath.Join(full_destination, http_conf))
 	modify_http_conf(filepath.Join(full_destination, http_ssl_conf))
+	modify_http_conf(filepath.Join(full_destination, "httpdocs", ".user.ini"))
+	
 	activate_vhost(filepath.Join(full_destination, http_conf))
+	reload_apache()
+
+	request_certificate()
+
+	// only merge configs if SSL certificate exists
+	if _, err := os.Stat(filepath.Join("/var/lib/acme/live/", domain, "fullchain")); err == nil {
+		fmt.Println("Successfully requested certificates, merging config files")
+
+		merge_http_https_config(filepath.Join(full_destination, http_conf), filepath.Join(full_destination, http_ssl_conf))
+		reload_apache()
+
+		err := os.Remove(filepath.Join(full_destination, http_ssl_conf))
+		if err != nil {
+			log.Fatal(err)
+			os.Exit(1)
+		}
+	}
 
 	for _, file := range files {
+		fmt.Println("Changing ownership of virtualhost files")
 		joined_path := filepath.Join(full_destination, file.Name())
 
 		change_ownership(joined_path)
+	}
+}
+
+func reload_apache() {
+	apachectl_path, err := exec.LookPath("service")
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Reloading apache")
+	apachectl_cmd := exec.Command(apachectl_path, "apache2", "reload")
+	err = apachectl_cmd.Run()
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(254)
+	}
+}
+
+func merge_http_https_config(http_conf_file string, http_ssl_conf_file string) {
+	// read the HTTPS config file...
+	content, err := ioutil.ReadFile(http_ssl_conf_file)
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+
+	// ... open HTTP config file for appending
+	file, err := os.OpenFile(http_conf_file, os.O_WRONLY | os.O_APPEND, 0775)
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+	// close the file at the end of the function regardless what happens
+	defer file.Close()
+
+	_, err = file.Write(content)
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+}
+
+func request_certificate() {
+	acmetool_path, err := exec.LookPath("acmetool")
+	if err != nil {
+		log.Fatal(err)
+		os.Exit(1)
+	}
+
+	acmetool_cmd := exec.Command(acmetool_path, "want", domain)
+	err = acmetool_cmd.Run()
+	if err != nil {
+		log.Fatal("Could not request SSL certificate")
+		log.Fatal(err)
+		os.Exit(254)
 	}
 }
 
