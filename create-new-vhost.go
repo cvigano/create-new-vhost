@@ -7,6 +7,7 @@ import (
 	"github.com/termie/go-shutil"
 	"io/ioutil"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -38,6 +39,17 @@ func init() {
 	getopt.FlagLong(&www_group, "www-group", 0, "webserver group").SetOptional()
 	getopt.FlagLong(&sites_available, "sites-available", 0, "directory to symlink virtualhost configuration to").SetOptional()
 
+}
+
+func check_if_domain_is_registered(domain string) {
+	_, err := net.LookupHost(domain)
+	if err != nil {
+		fmt.Println("Domain not registered. Please register domain first, then restart script")
+		log.Fatal(err)
+		os.Exit(9)
+	}
+
+	fmt.Println("Domain is registered, continuing.")
 }
 
 func fetch_user_group_id() {
@@ -131,6 +143,8 @@ func main() {
 		getopt.Usage()
 		os.Exit(1)
 	}
+
+	check_if_domain_is_registered(domain)
 
 	args := getopt.Args()
 	if len(args) > 0 && args[0] == "redo-ssl" {
